@@ -109,11 +109,10 @@ def about_this_account(wire, sess, pk):
 
 
 # Localized "date joined" labels, used to strip the label and keep the date.
-_JOINED_LABELS = ("Date joined", "Joined", "加入日期", "加入時間",
-                  "Fecha de incorporación", "Data de entrada")
+_JOINED_LABELS = ("Date joined", "Joined", "Fecha de incorporación",
+                  "Data de entrada")
 _DATE_RX = re.compile(
-    r"(\d{4}\s*年\s*\d{1,2}\s*月"
-    r"|[A-Za-zÀ-ÿ]+\.?\s+(?:de\s+)?\d{4}"
+    r"([A-Za-zÀ-ÿ]+\.?\s+(?:de\s+)?\d{4}"
     r"|\d{1,2}\s+[A-Za-zÀ-ÿ]+\.?\s+\d{4})")
 
 
@@ -149,8 +148,7 @@ def parse_about(text):
         if d:
             out["date_joined"] = d.group(1).strip()
 
-    out["is_verified"] = ("已认证" in text or "已認證" in text
-                          or '"Verified"' in text or "认证徽章" in text)
+    out["is_verified"] = '"Verified"' in text
 
     m = re.search(r'"㗙":\{"\$":"([^"]*)"', text)
     if m:

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Batch-lookup Instagram account regions and export them grouped by country.
 
 Inputs
@@ -22,7 +22,6 @@ Usage
   python ig_region_lookup.py                  # asks for concurrency
   python ig_region_lookup.py --threads 8      # 8 threads
   python ig_region_lookup.py --delay 2.5      # seconds between lookups on one worker
-  python ig_region_lookup.py --names cn       # Chinese region filenames
   python ig_region_lookup.py --reset          # wipe progress and output
   python ig_region_lookup.py --limit 20       # only 20 targets (debugging)
 
@@ -71,30 +70,6 @@ PROGRESS_FILE = os.path.join(HERE, "_done.txt")
 
 OUT_DIR = os.path.join(HERE, "regions")
 OUT_CSV = os.path.join(HERE, "result.csv")
-
-# English region name (returned for en_US) -> Chinese filename, used with --names cn.
-CN = {
-    "United States": "美国", "China": "中国", "Hong Kong": "香港",
-    "Taiwan": "台湾", "Singapore": "新加坡", "South Korea": "韩国",
-    "North Korea": "朝鲜", "Japan": "日本", "India": "印度", "Myanmar": "缅甸",
-    "Iran": "伊朗", "Vietnam": "越南", "Canada": "加拿大", "Indonesia": "印度尼西亚",
-    "Australia": "澳大利亚", "Cambodia": "柬埔寨", "Mexico": "墨西哥",
-    "Dominican Republic": "多米尼加", "Peru": "秘鲁", "Colombia": "哥伦比亚",
-    "Syria": "叙利亚", "Macau": "澳门", "Pakistan": "巴基斯坦", "Malaysia": "马来西亚",
-    "Guyana": "圭亚那", "Ecuador": "厄瓜多尔", "Yemen": "也门", "Brazil": "巴西",
-    "Côte d'Ivoire": "科特迪瓦", "Philippines": "菲律宾", "Maldives": "马尔代夫",
-    "Turkey": "土耳其", "Jamaica": "牙买加", "Bangladesh": "孟加拉国",
-    "Costa Rica": "哥斯达黎加", "Nigeria": "尼日利亚", "Liberia": "利比里亚",
-    "Russia": "俄罗斯", "Thailand": "泰国", "United Kingdom": "英国",
-    "France": "法国", "Germany": "德国", "Spain": "西班牙", "Italy": "意大利",
-    "Netherlands": "荷兰", "Belgium": "比利时", "Switzerland": "瑞士",
-    "Sweden": "瑞典", "Norway": "挪威", "Denmark": "丹麦", "Finland": "芬兰",
-    "Poland": "波兰", "Austria": "奥地利", "Ireland": "爱尔兰", "Portugal": "葡萄牙",
-    "Greece": "希腊", "Ukraine": "乌克兰", "Nepal": "尼泊尔", "Sri Lanka": "斯里兰卡",
-    "Laos": "老挝", "United Arab Emirates": "阿联酋", "Saudi Arabia": "沙特阿拉伯",
-    "Egypt": "埃及", "Iraq": "伊拉克", "Afghanistan": "阿富汗", "Argentina": "阿根廷",
-    "Chile": "智利", "Venezuela": "委内瑞拉",
-}
 
 
 # ────────────────────────────── config ──────────────────────────────
@@ -178,14 +153,14 @@ def safe_append(path, text):
 _warned_locked = set()
 
 
-def bucket_for(country, status, use_cn=False):
+def bucket_for(country, status):
     """-> bucket name (region / Invalid / Not shared)."""
     if status.startswith("not found") or status.startswith("skipped"):
-        return "失效" if use_cn else "Invalid"
+        return "Invalid"
     c = (country or "").strip()
     if not c:
-        return "未公开所在地" if use_cn else "Not shared"
-    return CN.get(c, c) if use_cn else c
+        return "Not shared"
+    return c
 
 
 def _strip_count(stem):
@@ -311,7 +286,7 @@ def query_once(sess, username):
 
     info = A.parse_about(body2)
     country = info.get("country")
-    if country in ("", "未分享", "Not shared", "未公開"):
+    if country in ("", "Not shared"):
         country = None
     return "done", country, "ok" if country else "region not shared"
 
@@ -326,8 +301,6 @@ def main():
                     help="seconds between two lookups on the same worker")
     ap.add_argument("--cooldown", type=float, default=20,
                     help="seconds a rate-limited worker stays out of the pool")
-    ap.add_argument("--names", choices=("en", "cn"), default="en",
-                    help="region filename language (default: en)")
     ap.add_argument("--reset", action="store_true",
                     help="clear progress and output, start over")
     ap.add_argument("--limit", type=int, default=0,
@@ -440,11 +413,10 @@ def main():
     stop = threading.Event()
     done_n = [0]
     total = len(pending)
-    use_cn = (args.names == "cn")
 
     def record(username, line, country, status):
         """Final answer: write to regions/<bucket>.txt, CSV and progress."""
-        bucket = bucket_for(country, status, use_cn)
+        bucket = bucket_for(country, status)
         path = os.path.join(OUT_DIR, safe_name(bucket) + ".txt")
         with lock:
             safe_append(path, line + "\n")

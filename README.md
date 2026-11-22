@@ -120,7 +120,6 @@ python ig_region_lookup.py --threads 8     # 8 threads
 python ig_region_lookup.py --delay 3       # 3s between two lookups on the same worker
 python ig_region_lookup.py --limit 20      # only 20 targets, for debugging
 python ig_region_lookup.py --reset         # wipe progress and output, start over
-python ig_region_lookup.py --names cn      # Chinese region filenames instead of English
 ```
 
 | Flag | Default | Meaning |
@@ -129,7 +128,6 @@ python ig_region_lookup.py --names cn      # Chinese region filenames instead of
 | `--delay` | 2.5 | seconds between two lookups on the same worker |
 | `--cooldown` | 20 | how long a rate-limited worker stays out of the pool |
 | `--limit` | 0 | max targets this run, 0 = unlimited |
-| `--names` | `en` | region filename language: `en` -> `regions/Japan.txt`, `cn` -> localized name |
 | `--reset` | - | delete `_done.txt`, `regions/` and `result.csv` first |
 
 ## Output
@@ -156,8 +154,8 @@ the total row count is preserved.
   returns a bloks tree; the region is the `initial` value of
   `about_this_account_country`. The old `/api/v1/users/<pk>/account_details/`
   endpoint is retired.
-- **Language**: requests are sent with `en_US` so the API returns English country
-  names, which are then mapped to output filenames.
+- **Language**: requests are sent with `en_US`, so region names come back in English
+  and are used directly as output filenames (`regions/United States.txt`).
 - **Concurrency**: worker queue + target queue + thread pool. `retry` puts the
   target back, `dead` removes the worker.
 - **Client identifiers**: `app_version`, `version_code` and `bloks_version` all come
