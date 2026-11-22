@@ -1,8 +1,8 @@
-# 传输层: 有 rnet 就用它的 Android OkHttp 指纹, 没有则退回 requests
+# transport: Android OkHttp fingerprint when available, falls back to requests
 rnet>=2.0.0
 
-# IG 可能返回 zstd 压缩, 需要能解
+# decompress zstd responses
 zstandard>=0.21.0
 
-# Windows 控制台 ANSI 颜色
+# ANSI colors in the Windows console
 colorama>=0.4.6; sys_platform == "win32"

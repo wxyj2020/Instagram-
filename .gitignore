@@ -1,4 +1,4 @@
-# 个人数据 / 运行产物, 不要提交
+# personal data / run artifacts, never commit these
 ck.txt
 targets.txt
 config.ini
@@ -16,7 +16,7 @@ venv/
 *.egg-info/
 .pytest_cache/
 
-# 编辑器 / 系统
+# editors / OS
 .idea/
 .vscode/
 .DS_Store

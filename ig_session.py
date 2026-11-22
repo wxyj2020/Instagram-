@@ -1,25 +1,27 @@
 # -*- coding: utf-8 -*-
-"""Instagram 移动端会话 + 传输层。
+"""Instagram mobile session + transport layer.
 
-这个模块只做两件事:
+This module does two things:
 
-1) 把 ck 文件里的一行解析成 Session 对象(账号、cookie、设备指纹、代理)
-2) 把请求按移动端 App 的头序发出去, 并把服务端下发的会话头收回来
+1) Turn one line of a ck file into a Session object (account, cookies, device
+   fingerprint, proxy).
+2) Send requests with the mobile app's header order and harvest the session
+   headers the server sends back.
 
-ck 文件每行支持两种写法, 混排也行:
+Each ck line can use either format, mixing is fine:
 
-  A) JSON dict(推荐, 设备信息可以自己写死):
+  A) JSON dict (recommended, device fields optional):
      {"ds_user_id": "123456", "sessionid": "123456%3A...",
       "csrftoken": "...", "mid": "...", "ig_did": "...", "datr": "...",
       "android_id": "android-xxxxxxxxxxxxxxxx", "device_id": "<uuid>",
       "family_device_id": "<uuid>", "ua": "Instagram ... Android ...",
       "proxy": "socks5h://user:pass@host:port"}
 
-  B) cookie 串(从浏览器/抓包里复制的那种):
+  B) Cookie string (what you copy from a browser or a capture):
      datr=..; ig_did=..; mid=..; csrftoken=..; ds_user_id=123; sessionid=123%3A..
 
-  cookie 串里没有设备信息, 会按 ds_user_id 派生一套**固定**的值 ——
-  同一个号每次算出来都一样, 不会因为换进程就变成"新设备"。
+  Cookie strings carry no device info, so a fixed set is derived from ds_user_id:
+  the same account always maps to the same device, across runs and machines.
 """
 import base64
 import hashlib
@@ -27,9 +29,9 @@ import json
 import re
 import uuid
 
-try:                                    # 有 rnet 就用它的 TLS/HTTP2 指纹
+try:                                    # prefer rnet for its TLS/HTTP2 fingerprint
     import rnet
-except ImportError:                     # 没有就退回 requests
+except ImportError:                     # otherwise fall back to requests
     rnet = None
     import requests
 
@@ -38,9 +40,10 @@ try:
 except ImportError:
     zstandard = None
 
-# ── 客户端标识: 不含任何写死的版本号, 全部由 config.ini [client] 提供 ──
-# 请求头里需要 x-ig-app-id / x-bloks-version-id / User-Agent 里的版本号,
-# 这些随 App 更新会变, 所以留给使用者自己填(见 config.example.ini)。
+# ── Client identity: no version numbers live in the source ──
+# Requests need x-ig-app-id / x-bloks-version-id / a User-Agent with the app
+# version. Those change with every app release, so the user supplies them
+# through config.ini (see config.example.ini).
 APP_ID = "567067343352427"
 HOST = "i.instagram.com"
 
@@ -53,7 +56,7 @@ CLIENT = {
 
 
 def configure(app_version="", version_code="", bloks_version="", ua=""):
-    """由主程序从 config.ini 注入客户端标识。"""
+    """Inject client identifiers from config.ini (called by the entry point)."""
     CLIENT["app_version"] = (app_version or "").strip()
     CLIENT["version_code"] = (version_code or "").strip()
     CLIENT["bloks_version"] = (bloks_version or "").strip()
@@ -65,28 +68,28 @@ def configure(app_version="", version_code="", bloks_version="", ua=""):
 
 
 def require_client():
-    """缺必需项就抛错, 别让请求发出去才发现头是空的。"""
+    """Fail fast when the client identity is incomplete."""
     need = [k for k in ("app_version", "version_code", "bloks_version", "ua")
             if not CLIENT[k]]
     if need:
         raise RuntimeError(
-            "config.ini 缺少 [client] 配置: %s\n"
-            "  请参考 config.example.ini, 用抓包工具从已登录的 App 里取:\n"
-            "    app_version   -> User-Agent 里的版本号\n"
-            "    version_code  -> User-Agent 末尾的数字\n"
-            "    bloks_version -> 请求头 x-bloks-version-id" % ", ".join(need))
+            "config.ini is missing [client] values: %s\n"
+            "  See config.example.ini and capture them from a logged-in app:\n"
+            "    app_version   -> version number in the User-Agent\n"
+            "    version_code  -> trailing number in the User-Agent\n"
+            "    bloks_version -> x-bloks-version-id request header" % ", ".join(need))
 
 _COOKIE_KEYS = ("sessionid", "ds_user_id", "csrftoken", "mid", "ig_did", "datr")
-_SESSID_RX = re.compile(r"(sessid-)[^-@:/]+")   # 代理模板里可替换的会话位
+_SESSID_RX = re.compile(r"(sessid-)[^-@:/]+")   # session slot in a proxy template
 
 
-# ────────────────────────────── 账号解析 ──────────────────────────────
+# ────────────────────────────── account parsing ──────────────────────────────
 
 def make_bearer(ds_user_id, sessionid):
-    """App 的 Authorization: Bearer IGT:2:<base64>。
+    """Build the app's ``Authorization: Bearer IGT:2:<base64>`` header.
 
-    解出来就是 {"ds_user_id": "...", "sessionid": "..."}(sessionid 保持 URL 编码),
-    所以只凭 cookie 串就能拼出来, 不需要额外登录。
+    The decoded payload is just {"ds_user_id": "...", "sessionid": "..."}
+    (sessionid keeps its URL encoding), so a cookie string is all you need.
     """
     payload = json.dumps(
         {"ds_user_id": str(ds_user_id), "sessionid": sessionid},
@@ -95,12 +98,12 @@ def make_bearer(ds_user_id, sessionid):
 
 
 def parse_cookie_line(line):
-    """一行 -> dict(裸 cookie 字段)。解析不出返回 None。"""
+    """Parse one line into a dict of raw cookie fields. Returns None on failure."""
     line = (line or "").strip()
     if not line or line.startswith("#"):
         return None
 
-    # A) JSON dict: 行里有什么用什么
+    # A) JSON dict: use whatever the line provides
     if line.startswith("{"):
         try:
             c = json.loads(line)
@@ -118,7 +121,7 @@ def parse_cookie_line(line):
             c["ds_user_id"] = uid
             return c
 
-    # B) cookie 串: 可能整行, 也可能藏在 ---- 分隔的某一段
+    # B) cookie string: may be the whole line or one ---- separated segment
     seg = line
     for part in line.split("----"):
         if "sessionid=" in part:
@@ -140,7 +143,7 @@ def parse_cookie_line(line):
 
 
 def derive_device(ds_user_id):
-    """按 uid 派生一套固定的设备字段(不落盘, 同一个号永远同一套)。"""
+    """Derive a stable device fingerprint from the uid (nothing is stored)."""
     key = ("ig-region-lookup:" + str(ds_user_id)).encode()
     h = (hashlib.sha256(key).hexdigest()
          + hashlib.sha256(key + b"|device").hexdigest())
@@ -154,7 +157,7 @@ def derive_device(ds_user_id):
 
 
 class Session(object):
-    """一个工作号的完整会话状态。"""
+    """Full session state for one worker account."""
 
     def __init__(self, d):
         self.ds_user_id = str(d.get("ds_user_id") or "")
@@ -175,10 +178,10 @@ class Session(object):
         self.tz = d.get("tz") or "0"
         self.bearer = d.get("bearer") or make_bearer(self.ds_user_id, self.sessionid)
 
-        # 服务端下发后会回填
+        # Filled in from server response headers.
         self.www_claim = d.get("www_claim") or "0"
         self.rur = d.get("rur") or ""
-        # 每号固定一个 pigeon session
+        # One pigeon session per account, stable for its lifetime.
         self.pigeon_session = "UFS-%s-1" % uuid.uuid4()
 
         self.web_cookie = self._build_web_cookie(d)
@@ -202,7 +205,7 @@ class Session(object):
 
 
 def load_sessions(path, region="mix"):
-    """读 ck 文件 -> [Session], 同一个 uid 只保留第一条。"""
+    """Read a ck file into a list of Sessions, keeping only the first line per uid."""
     out, seen = [], set()
     try:
         import io
@@ -225,13 +228,13 @@ def load_sessions(path, region="mix"):
     return out
 
 
-# ────────────────────────────── 代理 ──────────────────────────────
+# ────────────────────────────── proxy ──────────────────────────────
 
 def proxy_for(uid, tpl):
-    """按 uid 生成独立会话代理: 每个号固定一个出口 IP。
+    """Build a sticky proxy URL for one account.
 
-    模板里 {sid} 会被替换; 写成 sessid-xxxx 的也会自动替换;
-    都没有就原样使用(所有号共用一个出口)。
+    ``{sid}`` is replaced per uid; a literal ``sessid-xxxx`` is rewritten the same
+    way; with neither, the template is returned unchanged (all accounts share one IP).
     """
     tpl = (tpl or "").strip()
     if not tpl:
@@ -245,7 +248,7 @@ def proxy_for(uid, tpl):
 
 
 def mask_proxy(url):
-    """打印时遮掉代理密码。"""
+    """Hide the password before printing."""
     try:
         head, tail = url.split("://", 1)
         if "@" in tail:
@@ -257,12 +260,12 @@ def mask_proxy(url):
     return url
 
 
-# ────────────────────────────── 传输 ──────────────────────────────
+# ────────────────────────────── transport ──────────────────────────────
 
 class Resp(object):
     def __init__(self, status, headers, body):
         self.status = int(status)
-        self.headers = headers          # 键全小写
+        self.headers = headers          # all keys lowercased
         self.body = body
 
     def text(self):
@@ -285,7 +288,8 @@ def _decompress(body, enc):
     try:
         if enc == "zstd" and zstandard:
             import io as _io
-            # IG 的 zstd 是流式帧且帧头不带 content-size, 必须跨帧读
+            # IG sends zstd as streaming frames without content-size in the
+            # header, so it must be read across frames.
             with zstandard.ZstdDecompressor().stream_reader(
                     _io.BytesIO(body), read_across_frames=True) as r:
                 return r.read()
@@ -298,7 +302,7 @@ def _decompress(body, enc):
 
 
 class Wire(object):
-    """发请求。rnet 可用时用 OkHttp5/Android 指纹, 否则用 requests。"""
+    """HTTP client: OkHttp5/Android fingerprint when rnet is available."""
 
     def __init__(self, proxy=None, timeout=40):
         self.proxy = proxy or None
@@ -326,9 +330,10 @@ class Wire(object):
             self.client.headers.clear()
 
     def send(self, method, url, headers, body=b"", retry=2, idempotent=True):
-        """headers 是 [(k, v)] 列表, 保持顺序。
+        """``headers`` is a list of (key, value) pairs; order is preserved.
 
-        idempotent=False 的请求(比如发消息)只对"根本没发出去"的连接错误重试。
+        For ``idempotent=False`` requests (e.g. sending a message) only connection
+        errors -- requests that never left the machine -- are retried.
         """
         hd = dict(headers)
         last = None
@@ -353,8 +358,8 @@ class Wire(object):
                 r = self.client.request(method.upper(), url, headers=hd,
                                         data=body or None, timeout=self.timeout)
                 rh = {k.lower(): v for k, v in r.headers.items()}
-                return Resp(r.status_code, rh, _decompress(r.content,
-                                                            rh.get("content-encoding", "")))
+                return Resp(r.status_code, rh,
+                            _decompress(r.content, rh.get("content-encoding", "")))
             except Exception as e:
                 last = e
                 if i >= tries - 1:
@@ -367,7 +372,7 @@ class Wire(object):
         raise last
 
     def harvest(self, resp, sess):
-        """把响应头里服务端下发的会话值收进 Session。"""
+        """Store session values the server returned in headers."""
         for h, attr in (("ig-set-x-mid", "mid"), ("ig-set-ig-u-rur", "rur"),
                         ("x-ig-set-www-claim", "www_claim")):
             v = resp.headers.get(h)

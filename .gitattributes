@@ -1,4 +1,4 @@
-# 统一用 LF, 避免 Windows 上提交成 CRLF
+# keep LF in the repo so Windows checkouts do not flip line endings
 * text=auto eol=lf
 *.bat text eol=crlf
 *.ps1 text eol=crlf

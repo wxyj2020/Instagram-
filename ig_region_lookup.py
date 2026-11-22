@@ -1,34 +1,37 @@
 # -*- coding: utf-8 -*-
-"""批量查询 Instagram「账户所在地」并按地区分类保存。
+"""Batch-lookup Instagram account regions and export them grouped by country.
 
-输入
-----
-  ck.txt         工作号池, 一行一个(格式见 ig_session.py 顶部说明)。
-                 查询必须带登录态, 轮流使用, 撞限频/掉线自动换下一个。
-  targets.txt    要查的目标账号, 一行一个; 兼容两种行格式:
-                   - 用户名             (最简单)
-                   - 用户名----密码----... (老格式, 只取第一段)
-                   - {"username": "xxx", ...} (JSON 行, 只取 username)
+Inputs
+------
+  ck.txt         Worker account pool, one per line (format documented in
+                 ig_session.py). Lookups require a logged-in session; workers are
+                 rotated and replaced automatically on rate limits or expiry.
+  targets.txt    Usernames to look up, one per line. Three formats are accepted:
+                   - username
+                   - username----password----...        (only the first field is used)
+                   - {"username": "xxx", ...}           (JSON line)
 
-输出
-----
-  regions/美国.txt、regions/日本.txt ...   按账户所在地分文件, 存目标原始整行
-  result.csv                                明细: 用户名,国家,地区,状态
-  _done.txt                                 已查过的用户名(中断后可续查)
+Outputs
+-------
+  regions/<Region>.txt   One file per account region, holding the original target lines
+  result.csv             username,country,region,status
+  _done.txt              Usernames already processed (used to resume)
 
-用法
-----
-  python ig_region_lookup.py                  # 交互输入并发数
-  python ig_region_lookup.py --threads 8      # 8 线程
-  python ig_region_lookup.py --delay 2.5      # 同一个号两次查询间隔(秒)
-  python ig_region_lookup.py --reset          # 清空进度和结果重查
-  python ig_region_lookup.py --limit 20       # 只查 20 个(调试)
+Usage
+-----
+  python ig_region_lookup.py                  # asks for concurrency
+  python ig_region_lookup.py --threads 8      # 8 threads
+  python ig_region_lookup.py --delay 2.5      # seconds between lookups on one worker
+  python ig_region_lookup.py --names cn       # Chinese region filenames
+  python ig_region_lookup.py --reset          # wipe progress and output
+  python ig_region_lookup.py --limit 20       # only 20 targets (debugging)
 
-并发模型
---------
-  工作号池 + 目标队列 + N 个线程。线程"借号 -> 查一个 -> 还号",
-  同一个号任一时刻只被一个线程使用(天然限频); 号失效就踢出池,
-  目标塞回队列给别的号。并发数和号数解耦, 线程多于可用号时自动排队。
+Concurrency model
+-----------------
+  Worker pool + target queue + N threads. A thread borrows a worker, looks up one
+  target, and returns the worker. A worker is used by at most one thread at a time,
+  which rate-limits naturally. Dead workers leave the pool and their target goes
+  back to the queue; concurrency is independent of the pool size.
 """
 import argparse
 import configparser
@@ -46,7 +49,7 @@ from ig_session import (Wire, load_sessions, mask_proxy, proxy_for)
 import ig_session as S
 import ig_about as A
 
-# ── Windows 控制台 ANSI 颜色 ──
+# ── ANSI colors on Windows ──
 try:
     import colorama
     colorama.just_fix_windows_console()
@@ -69,7 +72,7 @@ PROGRESS_FILE = os.path.join(HERE, "_done.txt")
 OUT_DIR = os.path.join(HERE, "regions")
 OUT_CSV = os.path.join(HERE, "result.csv")
 
-# 英文国家名(IG en_US 返回) -> 中文文件名。没映射到的用英文原名。
+# English region name (returned for en_US) -> Chinese filename, used with --names cn.
 CN = {
     "United States": "美国", "China": "中国", "Hong Kong": "香港",
     "Taiwan": "台湾", "Singapore": "新加坡", "South Korea": "韩国",
@@ -94,24 +97,24 @@ CN = {
 }
 
 
-# ────────────────────────────── 配置 ──────────────────────────────
+# ────────────────────────────── config ──────────────────────────────
 
 def load_proxy_tpl():
-    """从 config.ini [proxy] url 读代理模板; 没有返回空(不走代理)。"""
+    """Read [proxy] url from config.ini; empty means no proxy."""
     if not os.path.isfile(CONFIG_FILE):
         return ""
-    cp = configparser.ConfigParser(interpolation=None)   # 关插值, 避免 % 报错
+    cp = configparser.ConfigParser(interpolation=None)   # no % interpolation
     try:
         cp.read(CONFIG_FILE, encoding="utf-8-sig")
         if cp.has_option("proxy", "url"):
             return (cp.get("proxy", "url") or "").strip()
     except Exception as e:
-        print(YELLOW + "[!] 读 config.ini 代理失败: %s" % e + RESET)
+        print(YELLOW + "[!] failed to read proxy from config.ini: %s" % e + RESET)
     return ""
 
 
 def load_client_cfg():
-    """从 config.ini [client] 读客户端标识(版本号、bloks 版本、UA)。"""
+    """Read client identifiers (versions, bloks version, UA) from [client]."""
     out = {"app_version": "", "version_code": "", "bloks_version": "", "ua": ""}
     if not os.path.isfile(CONFIG_FILE):
         return out
@@ -122,11 +125,11 @@ def load_client_cfg():
             if cp.has_option("client", k):
                 out[k] = (cp.get("client", k) or "").strip()
     except Exception as e:
-        print(YELLOW + "[!] 读 config.ini [client] 失败: %s" % e + RESET)
+        print(YELLOW + "[!] failed to read [client] from config.ini: %s" % e + RESET)
     return out
 
 
-# ────────────────────────────── 文件工具 ──────────────────────────────
+# ────────────────────────────── file helpers ──────────────────────────────
 
 def read_lines(path):
     if not os.path.isfile(path):
@@ -137,10 +140,10 @@ def read_lines(path):
 
 
 def target_username(line):
-    """从目标行提取 IG 用户名, 兼容纯用户名 / ---- 老格式 / JSON 行。"""
+    """Extract the IG username, accepting plain / ---- legacy / JSON lines."""
     s = (line or "").strip()
     i, j = s.find("{"), s.rfind("}")
-    if 0 <= i < j:                              # JSON 行: 抠出 {...}
+    if 0 <= i < j:                              # JSON line: pull out {...}
         try:
             c = json.loads(s[i:j + 1])
             if isinstance(c, dict):
@@ -153,11 +156,11 @@ def target_username(line):
 
 
 def safe_name(s):
-    return re.sub(r'[\\/:*?"<>|]', "_", (s or "").strip()) or "_空"
+    return re.sub(r'[\\/:*?"<>|]', "_", (s or "").strip()) or "_empty"
 
 
 def safe_append(path, text):
-    """追加写文件; 文件被占用(比如 Excel 打开)时重试几次, 仍失败只警告。"""
+    """Append to a file; retry when locked (e.g. open in Excel), warn once on failure."""
     for _ in range(6):
         try:
             with io.open(path, "a", encoding="utf-8") as f:
@@ -167,7 +170,7 @@ def safe_append(path, text):
             time.sleep(0.3)
     if path not in _warned_locked:
         _warned_locked.add(path)
-        print(YELLOW + "[!] 写不进 %s (是不是被别的程序打开了?), 已跳过"
+        print(YELLOW + "[!] cannot write %s (opened by another program?), skipped"
               % os.path.basename(path) + RESET)
     return False
 
@@ -175,23 +178,23 @@ def safe_append(path, text):
 _warned_locked = set()
 
 
-def bucket_for(country, status):
-    """-> 分桶名(中文国家 / 失效 / 未公开所在地)。"""
-    if status.startswith("目标查不到") or status.startswith("跳过"):
-        return "失效"
+def bucket_for(country, status, use_cn=False):
+    """-> bucket name (region / Invalid / Not shared)."""
+    if status.startswith("not found") or status.startswith("skipped"):
+        return "失效" if use_cn else "Invalid"
     c = (country or "").strip()
     if not c:
-        return "未公开所在地"
-    return CN.get(c, c)
+        return "未公开所在地" if use_cn else "Not shared"
+    return CN.get(c, c) if use_cn else c
 
 
 def _strip_count(stem):
-    """去掉文件名尾部的 _数字 (如 中国_3835 -> 中国)。"""
+    """Drop the trailing _<count>, e.g. Japan_3835 -> Japan."""
     return re.sub(r"_\d+$", "", stem)
 
 
 def normalize_region_dir(d):
-    """跑前把 regions/ 里带数量的文件名还原成纯名, 便于续查继续追加。"""
+    """Restore counted filenames before a run so results keep appending."""
     if not os.path.isdir(d):
         return
     for fp in glob.glob(os.path.join(d, "*.txt")):
@@ -211,7 +214,7 @@ def normalize_region_dir(d):
 
 
 def finalize_region_counts(d):
-    """跑完给每个文件名加数量: 中国.txt -> 中国_3835.txt, 并做总量守恒校验。"""
+    """Append row counts to filenames and verify no rows were lost."""
     files = glob.glob(os.path.join(d, "*.txt"))
     before = {}
     for fp in files:
@@ -230,16 +233,16 @@ def finalize_region_counts(d):
 
 
 def load_done():
-    """已查过的用户名集合(续查用)。"""
+    """Usernames already processed (for resuming)."""
     return {ln.strip().lstrip("@").lower()
             for ln in io.open(PROGRESS_FILE, encoding="utf-8", errors="replace")
             if ln.strip()} if os.path.isfile(PROGRESS_FILE) else set()
 
 
-# ────────────────────────────── 工作号 ──────────────────────────────
+# ────────────────────────────── workers ──────────────────────────────
 
 def build_workers(proxy_tpl=""):
-    """ck.txt -> [Session], 每个号分配独立出口 IP。"""
+    """ck.txt -> list of Sessions, each with its own egress IP."""
     workers = load_sessions(CK_FILE)
     for w in workers:
         w.proxy = proxy_for(w.ds_user_id, proxy_tpl)
@@ -249,7 +252,7 @@ def build_workers(proxy_tpl=""):
 
 
 def prune_ckfile(workers):
-    """把死号从 ck.txt 删掉, 只留活号的原始行。"""
+    """Rewrite ck.txt keeping only live workers."""
     alive = [w.raw_line for w in workers if not w.dead and w.raw_line]
     tmp = CK_FILE + ".tmp"
     for _ in range(6):
@@ -263,7 +266,7 @@ def prune_ckfile(workers):
 
 
 def _worker_dead(status, body):
-    """工作号本身不可用(需重新登录/同意条款/被挑战/限频)。"""
+    """The worker account itself is unusable (relogin / consent / challenge / limit)."""
     b = (body or "").lower()
     if status in (401, 403):
         return True
@@ -274,65 +277,67 @@ def _worker_dead(status, body):
 
 
 def query_once(sess, username):
-    """用一个工作号查一个目标 -> (flag, country, status)。
+    """Look up one target with one worker -> (flag, country, status).
 
-    flag = "done"   有定论(写入结果 + 记进度)
-    flag = "dead"   工作号认证失效, 踢出池
-    flag = "retry"  临时失败(限频/网络), 目标塞回队列, 号冷却
+    flag = "done"   final answer (write to output + progress)
+    flag = "dead"   worker auth is broken, drop it from the pool
+    flag = "retry"  temporary failure (rate limit/network), requeue target, cool down worker
     """
     try:
         st, user, resp = A.username_info(sess.wire, sess, username)
     except Exception as e:
-        return "retry", None, "usernameinfo异常:%s" % str(e)[:50]
+        return "retry", None, "usernameinfo error: %s" % str(e)[:50]
     if user is None:
         body = resp.text() if resp else ""
         if st == 429 or "rate" in body.lower() or "wait a few" in body.lower():
-            return "retry", None, "限频(HTTP 429)"
+            return "retry", None, "rate limited (HTTP 429)"
         if _worker_dead(st, body):
-            return "dead", None, "worker_dead(HTTP %s)" % st
+            return "dead", None, "worker_dead (HTTP %s)" % st
         if st == 404:
-            return "done", None, "目标查不到(HTTP 404)"
-        return "retry", None, "usernameinfo异常(HTTP %s)" % st
+            return "done", None, "not found (HTTP 404)"
+        return "retry", None, "usernameinfo failed (HTTP %s)" % st
 
     pk = str(user.get("pk") or user.get("pk_id") or "")
     try:
         st2, body2 = A.about_this_account(sess.wire, sess, pk)
     except Exception as e:
-        return "retry", None, "about异常:%s" % str(e)[:50]
-    if "bloks_payload" not in body2:        # 不是真面板, 多半是错误/闸门/限频
+        return "retry", None, "about error: %s" % str(e)[:50]
+    if "bloks_payload" not in body2:        # not the real panel: error/gate/rate limit
         if st2 == 429 or "rate" in body2.lower() or "wait a few" in body2.lower():
-            return "retry", None, "限频(HTTP 429)"
+            return "retry", None, "rate limited (HTTP 429)"
         if _worker_dead(st2, body2):
-            return "dead", None, "worker_dead(HTTP %s)" % st2
-        return "retry", None, "about异常(HTTP %s)" % st2
+            return "dead", None, "worker_dead (HTTP %s)" % st2
+        return "retry", None, "about failed (HTTP %s)" % st2
 
     info = A.parse_about(body2)
     country = info.get("country")
     if country in ("", "未分享", "Not shared", "未公開"):
         country = None
-    return "done", country, "ok" if country else "所在地未公开"
+    return "done", country, "ok" if country else "region not shared"
 
 
-# ────────────────────────────── 主流程 ──────────────────────────────
+# ────────────────────────────── main ──────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--threads", type=int, default=None,
-                    help="并发线程数(不填则启动时交互输入)")
+                    help="concurrent threads (prompted when omitted)")
     ap.add_argument("--delay", type=float, default=2.5,
-                    help="同一个号两次查询的间隔秒")
+                    help="seconds between two lookups on the same worker")
     ap.add_argument("--cooldown", type=float, default=20,
-                    help="工作号被限频(429)后的冷却秒数")
+                    help="seconds a rate-limited worker stays out of the pool")
+    ap.add_argument("--names", choices=("en", "cn"), default="en",
+                    help="region filename language (default: en)")
     ap.add_argument("--reset", action="store_true",
-                    help="清空进度和分类结果, 从头重新查")
+                    help="clear progress and output, start over")
     ap.add_argument("--limit", type=int, default=0,
-                    help="本次最多查几个(0=不限, 调试用)")
+                    help="max targets this run (0 = unlimited, for debugging)")
     args = ap.parse_args()
 
-    # ── 线程数: 启动页交互 ──
+    # ── concurrency: interactive prompt ──
     if args.threads is None:
         try:
-            raw = input("并发线程数 (回车默认 5): ").strip()
+            raw = input("Concurrent threads (Enter for 5): ").strip()
         except EOFError:
             raw = ""
         args.threads = int(raw) if raw.isdigit() and int(raw) > 0 else 5
@@ -349,9 +354,9 @@ def main():
                 os.remove(p)
             except OSError:
                 pass
-        print("[+] 已重置进度和结果, 从头开始")
+        print("[+] progress and output cleared")
 
-    # ── 客户端标识(版本号等)必须由 config.ini 提供 ──
+    # ── client identity (version numbers etc.) must come from config.ini ──
     S.configure(**load_client_cfg())
     try:
         S.require_client()
@@ -361,11 +366,11 @@ def main():
 
     targets = read_lines(TARGET_FILE)
     if not targets:
-        print("[!] targets.txt 为空或不存在")
+        print("[!] targets.txt is empty or missing")
         return
 
-    # ── 启动体检: 提前暴露取不出用户名的坏行 ──
-    n_json = n_old = n_bad = 0
+    # ── preflight: surface lines whose username cannot be parsed ──
+    n_json = n_plain = n_bad = 0
     bad_samples = []
     for ln in targets:
         s = ln.strip()
@@ -378,23 +383,25 @@ def main():
         elif is_json:
             n_json += 1
         else:
-            n_old += 1
-    print("[+] 目标体检: JSON格式 %d | 普通格式 %d | 取不出用户名 %d"
-          % (n_json, n_old, n_bad))
+            n_plain += 1
+    print("[+] targets: JSON %d | plain %d | unparsable %d"
+          % (n_json, n_plain, n_bad))
     if n_bad:
-        print(YELLOW + "    [!] 有 %d 行取不出有效用户名(将跳过), 例如:" % n_bad + RESET)
+        print(YELLOW + "    [!] %d line(s) have no usable username (will be skipped), e.g.:"
+              % n_bad + RESET)
         for s in bad_samples:
             print(YELLOW + "        " + s + RESET)
 
     proxy_tpl = load_proxy_tpl()
     if proxy_tpl:
-        print("[+] 代理: %s (每号独立会话IP)" % mask_proxy(proxy_tpl))
+        print("[+] proxy: %s (one egress IP per worker)" % mask_proxy(proxy_tpl))
     else:
-        print(YELLOW + "[!] 未配置代理(config.ini 为空), 从本机 IP 出, 易被 429" + RESET)
+        print(YELLOW + "[!] no proxy configured (config.ini empty); "
+              "requests leave from this machine and hit 429 quickly" + RESET)
 
     workers = build_workers(proxy_tpl)
     if not workers:
-        print("[!] ck.txt 没解析出可用工作号")
+        print("[!] no usable workers parsed from ck.txt")
         return
 
     done = load_done()
@@ -404,10 +411,11 @@ def main():
         pending = pending[:args.limit]
     nthreads = max(1, min(args.threads, len(workers)))
     already = len(targets) - len(pending)
-    print("[+] 工作号 %d | 当前目标 %d(已查 %d, 待查 %d) | 并发 %d 线程"
+    print("[+] workers %d | targets %d (done %d, pending %d) | threads %d"
           % (len(workers), len(targets), already, len(pending), nthreads))
     if not pending:
-        print(GREEN + "[+] 全部查过了, 无待查目标。--reset 可从头重查。" + RESET)
+        print(GREEN + "[+] nothing to do, everything is already processed. "
+              "Use --reset to start over." + RESET)
         return
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -417,7 +425,7 @@ def main():
     if not os.path.isfile(OUT_CSV):
         try:
             with io.open(OUT_CSV, "w", encoding="utf-8-sig") as f:
-                f.write("用户名,国家,地区,状态\n")
+                f.write("username,country,region,status\n")
         except OSError:
             pass
 
@@ -432,10 +440,11 @@ def main():
     stop = threading.Event()
     done_n = [0]
     total = len(pending)
+    use_cn = (args.names == "cn")
 
     def record(username, line, country, status):
-        """定论结果: 按国家写 regions/<中文国家>.txt + CSV + 进度。"""
-        bucket = bucket_for(country, status)
+        """Final answer: write to regions/<bucket>.txt, CSV and progress."""
+        bucket = bucket_for(country, status, use_cn)
         path = os.path.join(OUT_DIR, safe_name(bucket) + ".txt")
         with lock:
             safe_append(path, line + "\n")
@@ -444,7 +453,7 @@ def main():
             safe_append(PROGRESS_FILE, username + "\n")
             tally[bucket] = tally.get(bucket, 0) + 1
             done_n[0] += 1
-            print("[%d/%d] @%-22s -> %-11s [%s] (%s)" % (
+            print("[%d/%d] @%-22s -> %-16s [%s] (%s)" % (
                 done_n[0], total, username, country or "?", bucket, status))
 
     def consumer():
@@ -453,7 +462,7 @@ def main():
         except Exception as e:
             import traceback
             with lock:
-                print(RED + "[线程异常] %r" % e + RESET)
+                print(RED + "[thread error] %r" % e + RESET)
                 traceback.print_exc()
 
     def _consume():
@@ -464,7 +473,7 @@ def main():
                 return
             username = target_username(line)
             if not username or "{" in username or len(username) > 32:
-                record(username or "?", line, None, "跳过(取不出有效用户名)")
+                record(username or "?", line, None, "skipped (invalid username)")
                 continue
 
             acc = None
@@ -485,7 +494,7 @@ def main():
                 acc.dead = True
                 with lock:
                     prune_ckfile(workers)
-                    print(YELLOW + "[删号] 工作号 uid=%s 已失效(%s), 已从 ck.txt 删除"
+                    print(YELLOW + "[drop] worker uid=%s is dead (%s), removed from ck.txt"
                           % (acc.ds_user_id, status) + RESET)
                 target_q.put((idx, line))
                 continue
@@ -493,7 +502,7 @@ def main():
             if flag == "retry":
                 target_q.put((idx, line))
                 with lock:
-                    print(YELLOW + "[重试] @%s %s, 号 uid=%s 冷却 %ds"
+                    print(YELLOW + "[retry] @%s %s, worker uid=%s cooling down %ds"
                           % (username, status, acc.ds_user_id, args.cooldown) + RESET)
                 time.sleep(args.cooldown)
                 worker_q.put(acc)
@@ -503,7 +512,7 @@ def main():
             worker_q.put(acc)
             time.sleep(args.delay)
 
-    print("[+] 开始查询...")
+    print("[+] starting...")
     ts = [threading.Thread(target=consumer, daemon=True) for _ in range(nthreads)]
     for t in ts:
         t.start()
@@ -513,26 +522,27 @@ def main():
     prune_ckfile(workers)
 
     stats, tb, ta = finalize_region_counts(OUT_DIR)
-    print("\n[+] 本次完成。各地区累计(regions/):")
+    print("\n[+] done. Totals per region (regions/):")
     for name, n in sorted(stats, key=lambda x: -x[1]):
-        print("    %-14s %d" % (name, n))
-    print("    合计 %d 行 %s" % (ta, "(守恒OK)" if tb == ta else "(守恒异常:%d!=%d)" % (tb, ta)))
-    print("    明细: %s | 进度: %s" % (OUT_CSV, PROGRESS_FILE))
+        print("    %-20s %d" % (name, n))
+    print("    total %d rows %s" % (ta, "(OK)" if tb == ta else "(MISMATCH %d!=%d)" % (tb, ta)))
+    print("    detail: %s | progress: %s" % (OUT_CSV, PROGRESS_FILE))
 
     alive = sum(1 for w in workers if not w.dead)
     dead = len(workers) - alive
     if dead:
-        print(YELLOW + "    已从 ck.txt 删除 %d 个失效号, 剩余活号 %d 个"
+        print(YELLOW + "    removed %d dead worker(s) from ck.txt, %d left"
               % (dead, alive) + RESET)
     left = target_q.qsize()
     if alive == 0:
-        print(RED + "=" * 56 + RESET)
-        print(RED + "[!] 所有工作号都失效了(多半卡在「同意新条款」或掉线)," + RESET)
-        print(RED + "    ck.txt 已清空, 补充可用号后再运行会自动续查。" + RESET)
-        print(RED + "=" * 56 + RESET)
+        print(RED + "=" * 60 + RESET)
+        print(RED + "[!] every worker is dead (stuck on new terms or logged out)." + RESET)
+        print(RED + "    ck.txt was emptied; add working accounts and run again to resume."
+              + RESET)
+        print(RED + "=" * 60 + RESET)
     elif left:
-        print(YELLOW + "    还有 %d 个目标没查(工作号不够), 补号后再运行会自动续查"
-              % left + RESET)
+        print(YELLOW + "    %d target(s) left (not enough workers); "
+              "add accounts and run again to resume" % left + RESET)
 
 
 if __name__ == "__main__":
@@ -540,6 +550,6 @@ if __name__ == "__main__":
         main()
     finally:
         try:
-            input("\n按回车键退出...")
+            input("\nPress Enter to exit...")
         except EOFError:
             pass

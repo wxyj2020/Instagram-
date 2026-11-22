@@ -1,22 +1,24 @@
 ﻿# -*- coding: utf-8 -*-
-"""Instagram「关于此账户」查询。
+"""Instagram "About this account" lookup.
 
-移动端 App 里点开主页右上角「关于此账户」, 实际走的是一个 bloks 屏:
+In the mobile app, tapping "About this account" opens a bloks screen, which is
+backed by:
 
   POST https://i.instagram.com/api/v1/bloks/apps/com.instagram.interactions.about_this_account/
        params = {"server_params": {"target_user_id": <pk>, "user_id": <pk>}, ...}
 
-返回是一棵 bloks UI 树, 账户所在地 / 加入日期 / 是否认证都嵌在文本里:
+The response is a bloks UI tree; the region, join date and verified badge are all
+embedded as text inside it:
 
-  - 账户所在地: 数据项 IG_ABOUT_THIS_ACCOUNT:about_this_account_country 的 initial
-  - 加入日期  : 无障碍文本 "加入日期 2012年2月"
-  - 是否认证  : 树里出现 "已认证"
+  - region      : the ``initial`` value of about_this_account_country
+  - join date   : accessibility text like "Date joined February 2012"
+  - verified    : the tree contains "Verified"
 
-用户名 -> pk 走:
+Username -> pk goes through:
 
   GET https://i.instagram.com/api/v1/users/<username>/usernameinfo/
 
-注意: 老的 /api/v1/users/<pk>/account_details/ 已经下线, 别再用了。
+Note: the old /api/v1/users/<pk>/account_details/ endpoint is retired.
 """
 import json
 import re
@@ -29,7 +31,7 @@ ABOUT_APP = "com.instagram.interactions.about_this_account"
 
 
 def base_headers(sess, friendly, endpoint, now=None):
-    """移动端鉴权头 —— 只保留查询需要的那些。"""
+    """Mobile auth headers -- only the ones a lookup needs."""
     now = now or time.time()
     hd = [
         ("accept-language", sess.locale.replace("_", "-")),
@@ -70,7 +72,7 @@ def base_headers(sess, friendly, endpoint, now=None):
 
 
 def username_info(wire, sess, username):
-    """用户名 -> (status, user dict 或 None, Resp)。"""
+    """Username -> (status, user dict or None, Resp)."""
     url = "https://%s/api/v1/users/%s/usernameinfo/" % (S.HOST, quote(username))
     hd = base_headers(sess, "IgApi: users/{username}/usernameinfo/",
                       "ProfileMediaTabFragment:profile")
@@ -83,13 +85,13 @@ def username_info(wire, sess, username):
 
 
 def about_this_account(wire, sess, pk):
-    """pk -> (status, bloks 屏原始文本)。"""
+    """pk -> (status, raw bloks screen text)."""
     url = "https://%s/api/v1/bloks/apps/%s/" % (S.HOST, ABOUT_APP)
     hd = base_headers(sess, "IgApi: bloks/apps/%s/" % ABOUT_APP,
                       "AboutThisAccountFragment:about_this_account")
     hd.append(("content-type",
                "application/x-www-form-urlencoded; charset=UTF-8"))
-    # 这个屏也认 web 会话 cookie, 带上更稳
+    # This screen also accepts the web session cookie, which makes it more reliable.
     if sess.web_cookie:
         hd.append(("cookie", sess.web_cookie))
         if sess.csrftoken:
@@ -106,8 +108,8 @@ def about_this_account(wire, sess, pk):
     return r.status, r.text()
 
 
-# 多语言「加入日期」标签, 用来从无障碍文本里剥掉标签只留日期
-_JOINED_LABELS = ("加入日期", "加入時間", "Date joined", "Joined",
+# Localized "date joined" labels, used to strip the label and keep the date.
+_JOINED_LABELS = ("Date joined", "Joined", "加入日期", "加入時間",
                   "Fecha de incorporación", "Data de entrada")
 _DATE_RX = re.compile(
     r"(\d{4}\s*年\s*\d{1,2}\s*月"
@@ -116,7 +118,7 @@ _DATE_RX = re.compile(
 
 
 def parse_about(text):
-    """从 bloks 文本里抠出 所在地 / 加入日期 / 认证 / 所在地是否公开。"""
+    """Extract region / join date / verified / region visibility from bloks text."""
     out = {"country": None, "country_shared": None,
            "date_joined": None, "is_verified": None, "title": None}
 
@@ -129,7 +131,7 @@ def parse_about(text):
     if m:
         out["country_shared"] = (m.group(1) == "true")
 
-    # 兜底: 树里 (e2a (dnt "..") "美国" "未分享") 的第一个字面量
+    # Fallback: first literal in (e2a (dnt "..") "United States" "Not shared")
     if not out["country"]:
         m = re.search(r'\(e2a \(dnt \\?"[^"]+\\?"\) \\?"((?:\\u[0-9a-fA-F]{4})+'
                       r'|[^"\\]+)\\?"', text)
