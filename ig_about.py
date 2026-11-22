@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Instagram「关于此账户」查询。
 
 移动端 App 里点开主页右上角「关于此账户」, 实际走的是一个 bloks 屏:
@@ -23,8 +23,7 @@ import re
 import time
 from urllib.parse import quote, urlencode
 
-from ig_session import (APP_ID, BLOKS_VERSION, HOST,
-                        make_bearer)  # noqa: F401  (make_bearer 供外部复用)
+import ig_session as S
 
 ABOUT_APP = "com.instagram.interactions.about_this_account"
 
@@ -42,13 +41,13 @@ def base_headers(sess, friendly, endpoint, now=None):
         hd.append(("ig-u-rur", sess.rur))
     hd += [
         ("priority", "u=3"),
-        ("x-bloks-version-id", BLOKS_VERSION),
+        ("x-bloks-version-id", S.CLIENT["bloks_version"]),
         ("x-fb-client-ip", "True"),
         ("x-fb-connection-type", "WIFI"),
         ("x-fb-friendly-name", friendly),
         ("x-fb-server-cluster", "True"),
         ("x-ig-android-id", sess.android_id),
-        ("x-ig-app-id", APP_ID),
+        ("x-ig-app-id", S.APP_ID),
         ("x-ig-app-locale", sess.locale),
         ("x-ig-client-endpoint", endpoint),
         ("x-ig-capabilities", "3brTv10="),
@@ -72,7 +71,7 @@ def base_headers(sess, friendly, endpoint, now=None):
 
 def username_info(wire, sess, username):
     """用户名 -> (status, user dict 或 None, Resp)。"""
-    url = "https://%s/api/v1/users/%s/usernameinfo/" % (HOST, quote(username))
+    url = "https://%s/api/v1/users/%s/usernameinfo/" % (S.HOST, quote(username))
     hd = base_headers(sess, "IgApi: users/{username}/usernameinfo/",
                       "ProfileMediaTabFragment:profile")
     r = wire.send("GET", url, hd, b"", idempotent=True)
@@ -85,7 +84,7 @@ def username_info(wire, sess, username):
 
 def about_this_account(wire, sess, pk):
     """pk -> (status, bloks 屏原始文本)。"""
-    url = "https://%s/api/v1/bloks/apps/%s/" % (HOST, ABOUT_APP)
+    url = "https://%s/api/v1/bloks/apps/%s/" % (S.HOST, ABOUT_APP)
     hd = base_headers(sess, "IgApi: bloks/apps/%s/" % ABOUT_APP,
                       "AboutThisAccountFragment:about_this_account")
     hd.append(("content-type",
@@ -99,8 +98,8 @@ def about_this_account(wire, sess, pk):
         "params": json.dumps({"server_params": {
             "target_user_id": str(pk), "user_id": str(pk)}}),
         "bk_client_context": json.dumps(
-            {"bloks_version": BLOKS_VERSION, "styles_id": "instagram"}),
-        "bloks_versioning_id": BLOKS_VERSION,
+            {"bloks_version": S.CLIENT["bloks_version"], "styles_id": "instagram"}),
+        "bloks_versioning_id": S.CLIENT["bloks_version"],
     }
     r = wire.send("POST", url, hd, urlencode(params).encode(), idempotent=True)
     wire.harvest(r, sess)

@@ -71,7 +71,29 @@ somebody_else
 {"username": "third_one", "note": "任意附加字段"}
 ```
 
-### 3. `config.ini` —— 代理（可选但强烈建议）
+### 3. `config.ini` —— 客户端标识 + 代理
+
+复制 `config.example.ini` 为 `config.ini`，先填 `[client]`（必填）：
+
+```ini
+[client]
+app_version = x.y.z.w
+version_code = 1234567890
+bloks_version = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ua =
+```
+
+| 键 | 从哪来 |
+|---|---|
+| `app_version` | 已登录 App 的 `User-Agent` 里，`Instagram` 后面那个版本号 |
+| `version_code` | 同一个 `User-Agent` 末尾的数字 |
+| `bloks_version` | 请求头 `x-bloks-version-id` |
+| `ua` | 可留空，会自动拼安卓 UA |
+
+抓包工具看任意一个已登录请求就能拿到这三个值（Charles / Proxyman / mitmproxy 都行）。
+源码里不写死任何版本号，App 更新后改配置即可。
+
+代理（可选但强烈建议）：
 
 ```ini
 [proxy]
@@ -127,6 +149,8 @@ _done.txt            # 已查用户名(续查用)
   返回 bloks 树，从 `about_this_account_country` 的 `initial` 取值。
   旧的 `/api/v1/users/<pk>/account_details/` 已下线。
 - **语言**：请求统一按 `en_US` 发，国家名是英文，再做中文映射，归类更稳。
+- **版本号**：`app_version` / `version_code` / `bloks_version` 全部来自 `config.ini`，
+  源码里不写死，App 升级只需改配置。
 - **并发模型**：号池 + 目标队列 + 线程池；`retry` 的目标回队列、`dead` 的号踢出池。
 
 ## 注意
@@ -137,6 +161,13 @@ _done.txt            # 已查用户名(续查用)
 - 工作号必须处于正常登录状态；卡在「同意新条款 / 身份验证」的号会被判为失效并删除。
 - 本项目仅用于学习与协议研究。使用自动化手段访问 Instagram 可能违反其服务条款，
   由此产生的账号封禁等后果由使用者自行承担。
+
+## 联系
+
+- Telegram：[@wxyjw](https://t.me/wxyjw)
+- Telegram：[@insshopMall1](https://t.me/insshopMall1)
+- Mall address：https://wxyj.cc/
+- Telegram channel：https://t.me/Instagram_Mall
 
 ## License
 

@@ -38,15 +38,43 @@ try:
 except ImportError:
     zstandard = None
 
-# Instagram 安卓客户端的公开常量(来自客户端本身, 不是密钥)
+# ── 客户端标识: 不含任何写死的版本号, 全部由 config.ini [client] 提供 ──
+# 请求头里需要 x-ig-app-id / x-bloks-version-id / User-Agent 里的版本号,
+# 这些随 App 更新会变, 所以留给使用者自己填(见 config.example.ini)。
 APP_ID = "567067343352427"
-APP_VERSION = "440.0.0.19.86"
-VERSION_CODE = "1024972737"
-BLOKS_VERSION = ("3ae1e6445cdefeda05bde09f57499d84157ad74699044bf7fe9ca9"
-                 "183150f17a")
 HOST = "i.instagram.com"
-UA_FALLBACK = ("Instagram %s Android (28/9; 480dpi; 1080x1920; Xiaomi; MI 6; "
-               "sagit; qcom; zh_CN; %s)" % (APP_VERSION, VERSION_CODE))
+
+CLIENT = {
+    "app_version": "",
+    "version_code": "",
+    "bloks_version": "",
+    "ua": "",
+}
+
+
+def configure(app_version="", version_code="", bloks_version="", ua=""):
+    """由主程序从 config.ini 注入客户端标识。"""
+    CLIENT["app_version"] = (app_version or "").strip()
+    CLIENT["version_code"] = (version_code or "").strip()
+    CLIENT["bloks_version"] = (bloks_version or "").strip()
+    CLIENT["ua"] = (ua or "").strip()
+    if not CLIENT["ua"] and CLIENT["app_version"]:
+        CLIENT["ua"] = ("Instagram %s Android (28/9; 480dpi; 1080x1920; "
+                        "Xiaomi; MI 6; sagit; qcom; zh_CN; %s)"
+                        % (CLIENT["app_version"], CLIENT["version_code"]))
+
+
+def require_client():
+    """缺必需项就抛错, 别让请求发出去才发现头是空的。"""
+    need = [k for k in ("app_version", "version_code", "bloks_version", "ua")
+            if not CLIENT[k]]
+    if need:
+        raise RuntimeError(
+            "config.ini 缺少 [client] 配置: %s\n"
+            "  请参考 config.example.ini, 用抓包工具从已登录的 App 里取:\n"
+            "    app_version   -> User-Agent 里的版本号\n"
+            "    version_code  -> User-Agent 末尾的数字\n"
+            "    bloks_version -> 请求头 x-bloks-version-id" % ", ".join(need))
 
 _COOKIE_KEYS = ("sessionid", "ds_user_id", "csrftoken", "mid", "ig_did", "datr")
 _SESSID_RX = re.compile(r"(sessid-)[^-@:/]+")   # 代理模板里可替换的会话位
@@ -121,7 +149,7 @@ def derive_device(ds_user_id):
         "device_id": str(uuid.UUID(h[16:48])),
         "family_device_id": str(uuid.UUID(h[48:80])),
         "mid": h[80:112][:30],
-        "ua": UA_FALLBACK,
+        "ua": CLIENT["ua"],
     }
 
 

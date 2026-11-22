@@ -43,6 +43,7 @@ import threading
 import time
 
 from ig_session import (Wire, load_sessions, mask_proxy, proxy_for)
+import ig_session as S
 import ig_about as A
 
 # ── Windows 控制台 ANSI 颜色 ──
@@ -107,6 +108,22 @@ def load_proxy_tpl():
     except Exception as e:
         print(YELLOW + "[!] 读 config.ini 代理失败: %s" % e + RESET)
     return ""
+
+
+def load_client_cfg():
+    """从 config.ini [client] 读客户端标识(版本号、bloks 版本、UA)。"""
+    out = {"app_version": "", "version_code": "", "bloks_version": "", "ua": ""}
+    if not os.path.isfile(CONFIG_FILE):
+        return out
+    cp = configparser.ConfigParser(interpolation=None)
+    try:
+        cp.read(CONFIG_FILE, encoding="utf-8-sig")
+        for k in out:
+            if cp.has_option("client", k):
+                out[k] = (cp.get("client", k) or "").strip()
+    except Exception as e:
+        print(YELLOW + "[!] 读 config.ini [client] 失败: %s" % e + RESET)
+    return out
 
 
 # ────────────────────────────── 文件工具 ──────────────────────────────
@@ -333,6 +350,14 @@ def main():
             except OSError:
                 pass
         print("[+] 已重置进度和结果, 从头开始")
+
+    # ── 客户端标识(版本号等)必须由 config.ini 提供 ──
+    S.configure(**load_client_cfg())
+    try:
+        S.require_client()
+    except RuntimeError as e:
+        print(RED + "[!] " + str(e) + RESET)
+        return
 
     targets = read_lines(TARGET_FILE)
     if not targets:
