@@ -1,0 +1,23 @@
+# 个人数据 / 运行产物, 不要提交
+ck.txt
+targets.txt
+config.ini
+
+regions/
+result.csv
+_done.txt
+ck.txt.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

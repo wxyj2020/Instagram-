@@ -1,0 +1,6 @@
+# 要查询的目标账号, 每行一个
+# 三种写法都支持, 混排也行
+
+cristiano
+somebody_else
+{"username": "third_one", "note": "附加字段会被忽略"}

@@ -1,0 +1,7 @@
+# 工作号池: 每行一个, 同一时刻同一个号只会被一个线程使用
+#
+# 格式 A(推荐): JSON dict, 没写的设备字段会按 ds_user_id 自动派生
+# {"ds_user_id": "1234567890", "sessionid": "1234567890%3Axxxxxxxxxxxxxxxx", "csrftoken": "xxxxxxxx", "mid": "xxxxxxxx", "ig_did": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", "datr": "xxxxxxxx"}
+#
+# 格式 B: cookie 串
+# datr=xxxxxxxx; ig_did=xxxxxxxx; mid=xxxxxxxx; csrftoken=xxxxxxxx; ds_user_id=1234567890; sessionid=1234567890%3Axxxxxxxxxxxxxxxx
